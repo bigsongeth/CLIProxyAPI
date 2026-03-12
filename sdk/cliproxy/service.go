@@ -487,30 +487,6 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.applyRetryConfig(s.cfg)
 
-	if s.coreManager != nil {
-		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
-			log.Warnf("failed to load auth store: %v", errLoad)
-		}
-	}
-
-	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		return err
-	}
-	if tokenResult == nil {
-		tokenResult = &TokenClientResult{}
-	}
-
-	apiKeyResult, err := s.apiKeyProvider.Load(ctx, s.cfg)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		return err
-	}
-	if apiKeyResult == nil {
-		apiKeyResult = &APIKeyClientResult{}
-	}
-
-	// legacy clients removed; no caches to refresh
-
 	// handlers no longer depend on legacy clients; pass nil slice initially
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
 
@@ -550,6 +526,23 @@ func (s *Service) Run(ctx context.Context) error {
 		} else {
 			s.serverErr <- nil
 		}
+	}()
+
+	// Load auth data in background so the HTTP port opens immediately.
+	// Requests arriving before loading completes will see no credentials (acceptable brief window).
+	go func() {
+		if s.coreManager != nil {
+			if errLoad := s.coreManager.Load(ctx); errLoad != nil {
+				log.Warnf("failed to load auth store: %v", errLoad)
+			}
+		}
+		if _, errLoad := s.tokenProvider.Load(ctx, s.cfg); errLoad != nil && !errors.Is(errLoad, context.Canceled) {
+			log.Warnf("failed to load token provider: %v", errLoad)
+		}
+		if _, errLoad := s.apiKeyProvider.Load(ctx, s.cfg); errLoad != nil && !errors.Is(errLoad, context.Canceled) {
+			log.Warnf("failed to load api key provider: %v", errLoad)
+		}
+		log.Info("background auth loading completed")
 	}()
 
 	time.Sleep(100 * time.Millisecond)
@@ -616,7 +609,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.rebindExecutors()
 	}
 
-	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
+	watcherWrapper, err := s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
 	if err != nil {
 		return fmt.Errorf("cliproxy: failed to create watcher: %w", err)
 	}
